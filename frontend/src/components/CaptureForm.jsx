@@ -17,6 +17,10 @@ export default function CaptureForm() {
     firstTime: null
   });
   const [rewardCode, setRewardCode] = useState('');
+  const [rewardInfo, setRewardInfo] = useState({
+    description: 'Free beer after your round',
+    emoji: '🍺'
+  });
   const [errors, setErrors] = useState({});
   const [locationId, setLocationId] = useState(null);
 
@@ -81,9 +85,13 @@ export default function CaptureForm() {
       });
       
       const data = await response.json();
-      
+
       if (data.success) {
         setRewardCode(data.rewardCode);
+        setRewardInfo({
+          description: data.rewardDescription || 'Free beer after your round',
+          emoji: data.rewardEmoji || '🍺'
+        });
         setStep('success');
       } else {
         throw new Error(data.error || 'Something went wrong');
@@ -115,7 +123,7 @@ export default function CaptureForm() {
       <div className="min-h-screen bg-gradient-to-b from-green-800 to-green-900 flex flex-col">
         <div className="bg-green-900/50 px-6 py-4 text-center">
           <h1 className="text-xl font-bold text-white">Crescent Pointe</h1>
-          <p className="text-green-200 mt-1 text-sm">Free beer after your round</p>
+          <p className="text-green-200 mt-1 text-sm">Get a free reward on us!</p>
         </div>
         
         <div className="flex-1 px-4 py-3 overflow-auto">
@@ -376,17 +384,17 @@ export default function CaptureForm() {
           </div>
           
           <h2 className="text-xl font-bold text-gray-800 mb-1">You're in!</h2>
-          <p className="text-gray-500 text-sm mb-4">Show this at the bar for your free beer:</p>
-          
+          <p className="text-gray-500 text-sm mb-4">Show this code to redeem your reward:</p>
+
           <div className="bg-gray-100 rounded-xl p-5 mb-4">
             <p className="text-3xl font-mono font-bold text-green-700 tracking-wider">
               {rewardCode}
             </p>
           </div>
-          
+
           <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
             <p className="text-amber-800 font-semibold flex items-center justify-center gap-2">
-              <span className="text-xl">🍺</span> Free beer after your round
+              <span className="text-xl">{rewardInfo.emoji}</span> {rewardInfo.description}
             </p>
             <p className="text-amber-600 text-sm">Valid today only</p>
           </div>

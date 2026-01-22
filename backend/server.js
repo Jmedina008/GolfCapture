@@ -207,7 +207,24 @@ app.post('/api/capture', async (req, res) => {
     
     // Generate reward code
     const rewardCode = generateRewardCode();
-    
+
+    // Get location reward info (if location specified)
+    let rewardType = 'free_beer';
+    let rewardDescription = 'Free beer after your round';
+    let rewardEmoji = '🍺';
+
+    if (locationId) {
+      const locationResult = await client.query(
+        'SELECT reward_type, reward_description, reward_emoji FROM locations WHERE id = $1',
+        [locationId]
+      );
+      if (locationResult.rows.length > 0) {
+        rewardType = locationResult.rows[0].reward_type || rewardType;
+        rewardDescription = locationResult.rows[0].reward_description || rewardDescription;
+        rewardEmoji = locationResult.rows[0].reward_emoji || rewardEmoji;
+      }
+    }
+
     // Create capture record
     await client.query(`
       INSERT INTO captures (
@@ -220,16 +237,19 @@ app.post('/api/capture', async (req, res) => {
       locationId || null,
       JSON.stringify(req.body),
       rewardCode,
-      'free_beer',
+      rewardType,
       req.ip,
       req.get('User-Agent')
     ]);
-    
+
     await client.query('COMMIT');
-    
+
     res.json({
       success: true,
       rewardCode,
+      rewardType,
+      rewardDescription,
+      rewardEmoji,
       isNewCustomer,
       customerId
     });
