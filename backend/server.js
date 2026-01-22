@@ -4,6 +4,10 @@ const { Pool } = require('pg');
 const multer = require('multer');
 const csv = require('csv-parse');
 const { v4: uuidv4 } = require('uuid');
+const dns = require('dns');
+
+// Force IPv4 for DNS resolution (fixes Railway + Supabase connectivity)
+dns.setDefaultResultOrder('ipv4first');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -15,7 +19,7 @@ app.use(express.json());
 // Database connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: { rejectUnauthorized: false }
 });
 
 // Helper: Generate reward code
