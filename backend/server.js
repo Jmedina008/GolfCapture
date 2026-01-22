@@ -5,6 +5,8 @@ const multer = require('multer');
 const csv = require('csv-parse');
 const { v4: uuidv4 } = require('uuid');
 const dns = require('dns');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 // Force IPv4 for DNS resolution (fixes Railway + Supabase connectivity)
 dns.setDefaultResultOrder('ipv4first');
@@ -12,9 +14,30 @@ dns.setDefaultResultOrder('ipv4first');
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
+// JWT Secret (use environment variable in production)
+const JWT_SECRET = process.env.JWT_SECRET || 'golf-capture-secret-change-in-production';
+
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Auth Middleware
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ error: 'Access denied. No token provided.' });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (err) {
+    return res.status(403).json({ error: 'Invalid or expired token.' });
+  }
+};
 
 // Database connection
 const pool = new Pool({
@@ -981,6 +1004,139 @@ app.get('/api/export/customers', async (req, res) => {
     
   } catch (error) {
     console.error('Export error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// AUTHENTICATION ROUTES
+// ============================================
+
+// POST /api/auth/register - Create admin user (protected - only existing admins can create new users)
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { email, password, name, role = 'staff', courseSlug = 'crescent-pointe' } = req.body;
+
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'Email, password, and name are required' });
+    }
+
+    // Get course ID
+    const course = await pool.query('SELECT id FROM courses WHERE slug = $1', [courseSlug]);
+    if (course.rows.length === 0) {
+      return res.status(404).json({ error: 'Course not found' });
+    }
+    const courseId = course.rows[0].id;
+
+    // Check if user already exists
+    const existingUser = await pool.query('SELECT id FROM admin_users WHERE email = $1', [email.toLowerCase()]);
+    if (existingUser.rows.length > 0) {
+      return res.status(400).json({ error: 'User with this email already exists' });
+    }
+
+    // Hash password
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(password, salt);
+
+    // Create user
+    const result = await pool.query(`
+      INSERT INTO admin_users (course_id, email, password_hash, name, role)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, email, name, role, created_at
+    `, [courseId, email.toLowerCase(), passwordHash, name, role]);
+
+    res.status(201).json({
+      message: 'User created successfully',
+      user: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Register error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/auth/login - Login and get token
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    // Find user
+    const result = await pool.query(`
+      SELECT au.*, c.slug as course_slug
+      FROM admin_users au
+      JOIN courses c ON au.course_id = c.id
+      WHERE au.email = $1 AND au.is_active = true
+    `, [email.toLowerCase()]);
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const user = result.rows[0];
+
+    // Check password
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    // Update last login
+    await pool.query('UPDATE admin_users SET last_login = NOW() WHERE id = $1', [user.id]);
+
+    // Generate token
+    const token = jwt.sign(
+      {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        courseId: user.course_id,
+        courseSlug: user.course_slug
+      },
+      JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        courseSlug: user.course_slug
+      }
+    });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/auth/me - Get current user info
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT au.id, au.email, au.name, au.role, au.last_login, c.slug as course_slug
+      FROM admin_users au
+      JOIN courses c ON au.course_id = c.id
+      WHERE au.id = $1
+    `, [req.user.id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ user: result.rows[0] });
+
+  } catch (error) {
+    console.error('Get user error:', error);
     res.status(500).json({ error: error.message });
   }
 });

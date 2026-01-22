@@ -15,7 +15,7 @@ const playFrequencyLabels = {
   weekly: 'Weekly+'
 };
 
-export default function AdminDashboard() {
+export default function AdminDashboard({ user, onLogout }) {
   const [activeTab, setActiveTab] = useState('customers');
   const [customers, setCustomers] = useState([]);
   const [prospects, setProspects] = useState([]);
@@ -175,6 +175,20 @@ export default function AdminDashboard() {
               </svg>
               Export
             </button>
+            <div className="border-l border-gray-300 h-8 mx-2"></div>
+            <div className="flex items-center gap-3">
+              {user && (
+                <span className="text-sm text-gray-600">
+                  {user.name}
+                </span>
+              )}
+              <button
+                onClick={onLogout}
+                className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"
+              >
+                Logout
+              </button>
+            </div>
           </div>
         </div>
         
