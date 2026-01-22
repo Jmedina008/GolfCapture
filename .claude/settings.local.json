@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "Bash(npm:*)",
+      "Bash(git --version:*)",
+      "Bash(curl:*)",
+      "Bash(npx create-react-app . --template typescript)",
+      "Bash(npx tailwindcss:*)",
+      "Bash(./node_modules/.bin/tailwindcss init:*)"
+    ]
+  }
+}
