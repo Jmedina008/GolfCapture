@@ -136,7 +136,8 @@ app.post('/api/capture', async (req, res) => {
     // Check for existing customer by email or phone
     let customerId = null;
     let isNewCustomer = true;
-    
+    let existingCapture = null;
+
     if (normalizedEmail) {
       const existingByEmail = await client.query(
         'SELECT id, visit_count FROM customers WHERE course_id = $1 AND email = $2',
@@ -147,7 +148,7 @@ app.post('/api/capture', async (req, res) => {
         isNewCustomer = false;
       }
     }
-    
+
     if (!customerId && normalizedPhone) {
       const existingByPhone = await client.query(
         'SELECT id, visit_count FROM customers WHERE course_id = $1 AND phone = $2',
@@ -158,7 +159,46 @@ app.post('/api/capture', async (req, res) => {
         isNewCustomer = false;
       }
     }
-    
+
+    // Check if this person has already claimed a reward
+    if (!isNewCustomer && customerId) {
+      const captureCheck = await client.query(
+        'SELECT id, reward_code FROM captures WHERE customer_id = $1 LIMIT 1',
+        [customerId]
+      );
+      if (captureCheck.rows.length > 0) {
+        existingCapture = captureCheck.rows[0];
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          error: 'already_claimed',
+          message: 'You have already claimed your reward.',
+          existingCode: existingCapture.reward_code
+        });
+      }
+    }
+
+    // Also check by email/phone directly in captures (in case customer record differs)
+    if (normalizedEmail || normalizedPhone) {
+      const directCaptureCheck = await client.query(`
+        SELECT c.id, c.reward_code
+        FROM captures c
+        JOIN customers cu ON c.customer_id = cu.id
+        WHERE cu.course_id = $1 AND (cu.email = $2 OR cu.phone = $3)
+        LIMIT 1
+      `, [courseId, normalizedEmail, normalizedPhone]);
+
+      if (directCaptureCheck.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          success: false,
+          error: 'already_claimed',
+          message: 'You have already claimed your reward.',
+          existingCode: directCaptureCheck.rows[0].reward_code
+        });
+      }
+    }
+
     if (isNewCustomer) {
       // Create new customer
       const customerResult = await client.query(`

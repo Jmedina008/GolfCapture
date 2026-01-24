@@ -93,6 +93,14 @@ export default function CaptureForm() {
           emoji: data.rewardEmoji || '🍺'
         });
         setStep('success');
+      } else if (data.error === 'already_claimed') {
+        // They already have a code - show it to them
+        setRewardCode(data.existingCode);
+        setRewardInfo({
+          description: 'You already claimed your reward!',
+          emoji: '🎉'
+        });
+        setStep('already_claimed');
       } else {
         throw new Error(data.error || 'Something went wrong');
       }
@@ -369,12 +377,57 @@ export default function CaptureForm() {
     );
   }
 
+  // Already claimed screen
+  if (step === 'already_claimed') {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-amber-600 to-amber-700 flex flex-col">
+        <div className="bg-amber-800/50 px-6 py-5 text-center">
+          <h1 className="text-xl font-bold text-white">Crescent Pointe</h1>
+        </div>
+
+        <div className="flex-1 px-4 py-6 flex items-center justify-center">
+          <div className="bg-white rounded-2xl shadow-xl p-6 max-w-md mx-auto text-center">
+            <div className="w-14 h-14 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <span className="text-2xl">👋</span>
+            </div>
+
+            <h2 className="text-xl font-bold text-gray-800 mb-1">Welcome back!</h2>
+            <p className="text-gray-500 text-sm mb-4">You've already claimed your reward. Here's your code:</p>
+
+            <div className="bg-gray-100 rounded-xl p-5 mb-4">
+              <p className="text-3xl font-mono font-bold text-amber-700 tracking-wider">
+                {rewardCode}
+              </p>
+            </div>
+
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+              <p className="text-amber-800 text-sm">
+                Show this code to redeem your reward if you haven't already.
+              </p>
+            </div>
+
+            <div className="mt-4 pt-4 border-t border-gray-200">
+              <p className="text-xs text-gray-400 flex items-center justify-center gap-1.5">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                Screenshot this to save your code
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Success screen (new claim)
   return (
     <div className="min-h-screen bg-gradient-to-b from-green-800 to-green-900 flex flex-col">
       <div className="bg-green-900/50 px-6 py-5 text-center">
         <h1 className="text-xl font-bold text-white">Crescent Pointe</h1>
       </div>
-      
+
       <div className="flex-1 px-4 py-6 flex items-center justify-center">
         <div className="bg-white rounded-2xl shadow-xl p-6 max-w-md mx-auto text-center">
           <div className="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -382,7 +435,7 @@ export default function CaptureForm() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
             </svg>
           </div>
-          
+
           <h2 className="text-xl font-bold text-gray-800 mb-1">You're in!</h2>
           <p className="text-gray-500 text-sm mb-4">Show this code to redeem your reward:</p>
 
@@ -398,11 +451,7 @@ export default function CaptureForm() {
             </p>
             <p className="text-amber-600 text-sm">Valid today only</p>
           </div>
-          
-          <p className="text-xs text-gray-500">
-            We've also sent this to your phone.
-          </p>
-          
+
           <div className="mt-4 pt-4 border-t border-gray-200">
             <p className="text-xs text-gray-400 flex items-center justify-center gap-1.5">
               <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
