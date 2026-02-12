@@ -47,7 +47,8 @@ export default function AdminDashboard({ user, onLogout }) {
     if (activeTab === 'team' && user?.role === 'admin') {
       fetchTeamUsers();
     }
-  }, [activeTab]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, user?.role]);
 
   const fetchData = async () => {
     setLoading(true);
