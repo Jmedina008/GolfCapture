@@ -39,6 +39,14 @@ const authenticateToken = (req, res, next) => {
   }
 };
 
+// Admin-only middleware (must be used after authenticateToken)
+const requireAdmin = (req, res, next) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required.' });
+  }
+  next();
+};
+
 // Database connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -1072,8 +1080,8 @@ app.get('/api/export/customers', async (req, res) => {
 // AUTHENTICATION ROUTES
 // ============================================
 
-// POST /api/auth/register - Create admin user (protected - only existing admins can create new users)
-app.post('/api/auth/register', async (req, res) => {
+// POST /api/auth/register - Create admin user (admin only)
+app.post('/api/auth/register', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { email, password, name, role = 'staff', courseSlug = 'crescent-pointe' } = req.body;
 
@@ -1201,6 +1209,214 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
   }
 });
 
+// ============================================
+// TEAM MANAGEMENT ROUTES (admin only)
+// ============================================
+
+// GET /api/admin/users - List all admin users
+app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, email, name, role, is_active, last_login, created_at
+      FROM admin_users
+      ORDER BY created_at ASC
+    `);
+    res.json({ users: result.rows });
+  } catch (error) {
+    console.error('List users error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/admin/users/:id - Update user role/name/is_active
+app.put('/api/admin/users/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, role, is_active } = req.body;
+
+    // Prevent deactivating yourself
+    if (String(id) === String(req.user.id) && is_active === false) {
+      return res.status(400).json({ error: 'You cannot deactivate your own account.' });
+    }
+
+    // Prevent demoting yourself
+    if (String(id) === String(req.user.id) && role && role !== 'admin') {
+      return res.status(400).json({ error: 'You cannot change your own role.' });
+    }
+
+    const fields = [];
+    const params = [];
+    let idx = 1;
+
+    if (name !== undefined) { fields.push(`name = $${idx++}`); params.push(name); }
+    if (role !== undefined) { fields.push(`role = $${idx++}`); params.push(role); }
+    if (is_active !== undefined) { fields.push(`is_active = $${idx++}`); params.push(is_active); }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ error: 'No fields to update.' });
+    }
+
+    params.push(id);
+    const result = await pool.query(
+      `UPDATE admin_users SET ${fields.join(', ')} WHERE id = $${idx} RETURNING id, email, name, role, is_active`,
+      params
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    res.json({ user: result.rows[0] });
+  } catch (error) {
+    console.error('Update user error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/admin/users/:id - Remove user
+app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Prevent deleting yourself
+    if (String(id) === String(req.user.id)) {
+      return res.status(400).json({ error: 'You cannot delete your own account.' });
+    }
+
+    // Prevent deleting the last admin
+    const adminCount = await pool.query("SELECT COUNT(*) FROM admin_users WHERE role = 'admin' AND is_active = true");
+    const targetUser = await pool.query('SELECT role FROM admin_users WHERE id = $1', [id]);
+
+    if (targetUser.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    if (targetUser.rows[0].role === 'admin' && parseInt(adminCount.rows[0].count) <= 1) {
+      return res.status(400).json({ error: 'Cannot delete the last admin user.' });
+    }
+
+    await pool.query('DELETE FROM admin_users WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete user error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/auth/password - Change own password
+app.put('/api/auth/password', authenticateToken, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current password and new password are required.' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'New password must be at least 6 characters.' });
+    }
+
+    const user = await pool.query('SELECT password_hash FROM admin_users WHERE id = $1', [req.user.id]);
+    if (user.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    const valid = await bcrypt.compare(currentPassword, user.rows[0].password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: 'Current password is incorrect.' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(newPassword, salt);
+    await pool.query('UPDATE admin_users SET password_hash = $1 WHERE id = $2', [hash, req.user.id]);
+
+    res.json({ success: true, message: 'Password updated.' });
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// ADMIN SEED & SETUP
+// ============================================
+
+// Seed default admin on startup if admin_users table is empty
+async function seedDefaultAdmin() {
+  try {
+    const { rows } = await pool.query('SELECT COUNT(*) FROM admin_users');
+    if (parseInt(rows[0].count) > 0) return;
+
+    const defaultPassword = process.env.DEFAULT_ADMIN_PASSWORD;
+    if (!defaultPassword) {
+      console.warn('No DEFAULT_ADMIN_PASSWORD set — skipping admin seed');
+      return;
+    }
+
+    const course = await pool.query("SELECT id FROM courses WHERE slug = 'crescent-pointe'");
+    if (course.rows.length === 0) {
+      console.warn('Course not found — skipping admin seed');
+      return;
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(defaultPassword, salt);
+
+    await pool.query(
+      `INSERT INTO admin_users (course_id, email, password_hash, name, role)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [course.rows[0].id, 'joshmedina008@gmail.com', hash, 'Josh Medina', 'admin']
+    );
+    console.log('Default admin created: joshmedina008@gmail.com');
+  } catch (err) {
+    console.error('Seed admin error:', err.message);
+  }
+}
+
+// POST /api/setup - One-time fallback to create admin (gated by SETUP_TOKEN)
+app.post('/api/setup', async (req, res) => {
+  try {
+    const setupToken = process.env.SETUP_TOKEN;
+    if (!setupToken) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    const { token, email, password, name } = req.body;
+    if (token !== setupToken) {
+      return res.status(403).json({ error: 'Invalid setup token' });
+    }
+
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'Email, password, and name are required' });
+    }
+
+    const existing = await pool.query('SELECT id FROM admin_users WHERE email = $1', [email.toLowerCase()]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'User already exists' });
+    }
+
+    const course = await pool.query("SELECT id FROM courses WHERE slug = 'crescent-pointe'");
+    if (course.rows.length === 0) {
+      return res.status(404).json({ error: 'Course not found' });
+    }
+
+    const salt = await bcrypt.genSalt(10);
+    const hash = await bcrypt.hash(password, salt);
+
+    const result = await pool.query(
+      `INSERT INTO admin_users (course_id, email, password_hash, name, role)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, email, name, role`,
+      [course.rows[0].id, email.toLowerCase(), hash, name, 'admin']
+    );
+
+    res.status(201).json({ message: 'Admin created', user: result.rows[0] });
+  } catch (error) {
+    console.error('Setup error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -1208,8 +1424,9 @@ app.get('/health', (req, res) => {
 
 // Start server
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
+  await seedDefaultAdmin();
 });
 
 module.exports = app;
