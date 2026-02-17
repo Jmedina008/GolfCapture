@@ -22,7 +22,9 @@ export default function CaptureForm() {
   });
   const [maskedEmail, setMaskedEmail] = useState('');
   const [errors, setErrors] = useState({});
+  const [emailSuggestion, setEmailSuggestion] = useState('');
   const [submitError, setSubmitError] = useState('');
+  const [resendStatus, setResendStatus] = useState('');
   const [locationId, setLocationId] = useState(null);
   const [chosenReward, setChosenReward] = useState(null);
 
@@ -40,6 +42,26 @@ export default function CaptureForm() {
     if (loc) setLocationId(loc);
   }, []);
 
+  const checkEmailTypo = (email) => {
+    const domain = email.split('@')[1]?.toLowerCase();
+    if (!domain) return null;
+    const fixes = {
+      'gmail.con': 'gmail.com', 'gmail.co': 'gmail.com', 'gmial.com': 'gmail.com',
+      'gmal.com': 'gmail.com', 'gmaill.com': 'gmail.com', 'gmil.com': 'gmail.com',
+      'gnail.com': 'gmail.com', 'gamil.com': 'gmail.com', 'gmai.com': 'gmail.com',
+      'yahoo.con': 'yahoo.com', 'yahooo.com': 'yahoo.com', 'yaho.com': 'yahoo.com',
+      'yhoo.com': 'yahoo.com', 'yhaoo.com': 'yahoo.com',
+      'hotmail.con': 'hotmail.com', 'hotmal.com': 'hotmail.com', 'hotmial.com': 'hotmail.com',
+      'hotmai.com': 'hotmail.com', 'hitmail.com': 'hotmail.com',
+      'outlook.con': 'outlook.com', 'outlok.com': 'outlook.com',
+      'icloud.con': 'icloud.com', 'icoud.com': 'icloud.com', 'iclould.com': 'icloud.com',
+      'aol.con': 'aol.com', 'comcast.con': 'comcast.net',
+    };
+    const suggestion = fixes[domain];
+    if (suggestion) return email.split('@')[0] + '@' + suggestion;
+    return null;
+  };
+
   const validateForm = () => {
     const newErrors = {};
     if (!formData.firstName.trim()) newErrors.firstName = 'Required';
@@ -48,6 +70,12 @@ export default function CaptureForm() {
       newErrors.email = 'Required';
     } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
       newErrors.email = 'Invalid email';
+    } else {
+      const suggestion = checkEmailTypo(formData.email);
+      if (suggestion && emailSuggestion !== 'dismissed') {
+        setEmailSuggestion(suggestion);
+        newErrors.email = 'Check your email address';
+      }
     }
     if (!formData.phone.trim()) {
       newErrors.phone = 'Required';
@@ -138,6 +166,7 @@ export default function CaptureForm() {
       setFormData({ ...formData, [name]: value });
     }
     if (errors[name]) setErrors({ ...errors, [name]: null });
+    if (name === 'email') setEmailSuggestion('');
   };
 
   const selectOption = (field, value) => {
@@ -204,6 +233,36 @@ export default function CaptureForm() {
                   placeholder="john@example.com"
                   disabled={step === 'submitting'}
                 />
+                {emailSuggestion && emailSuggestion !== 'dismissed' && (
+                  <div className="mt-1 bg-amber-50 border border-amber-200 rounded-lg p-2 flex items-center justify-between">
+                    <p className="text-xs text-amber-800">
+                      Did you mean <strong>{emailSuggestion}</strong>?
+                    </p>
+                    <div className="flex gap-2 ml-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFormData({ ...formData, email: emailSuggestion });
+                          setEmailSuggestion('');
+                          setErrors({ ...errors, email: null });
+                        }}
+                        className="text-xs font-medium text-green-700 bg-green-100 px-2 py-1 rounded hover:bg-green-200"
+                      >
+                        Yes
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEmailSuggestion('dismissed');
+                          setErrors({ ...errors, email: null });
+                        }}
+                        className="text-xs font-medium text-gray-500 bg-gray-100 px-2 py-1 rounded hover:bg-gray-200"
+                      >
+                        No
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -435,6 +494,24 @@ export default function CaptureForm() {
 
   // Already claimed screen
   if (step === 'already_claimed') {
+    const handleResend = async () => {
+      setResendStatus('sending');
+      try {
+        const response = await fetch(`${API_URL}/api/rewards/resend`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: formData.email })
+        });
+        if (response.ok) {
+          setResendStatus('sent');
+        } else {
+          setResendStatus('error');
+        }
+      } catch {
+        setResendStatus('error');
+      }
+    };
+
     return (
       <div className="min-h-screen bg-gradient-to-b from-amber-600 to-amber-700 flex flex-col">
         <div className="bg-amber-800/50 px-6 py-5 text-center">
@@ -452,9 +529,23 @@ export default function CaptureForm() {
 
             <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
               <p className="text-amber-800 text-sm">
-                Check your email for your reward code. If you can't find it, ask a staff member for help.
+                Check your email for your reward code. Can't find it?
               </p>
             </div>
+
+            {resendStatus === 'sent' ? (
+              <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+                <p className="text-green-700 text-sm font-medium">Reward code resent! Check your inbox.</p>
+              </div>
+            ) : (
+              <button
+                onClick={handleResend}
+                disabled={resendStatus === 'sending'}
+                className="w-full bg-amber-600 hover:bg-amber-700 disabled:bg-amber-400 text-white font-medium py-2.5 rounded-lg text-sm transition"
+              >
+                {resendStatus === 'sending' ? 'Sending...' : resendStatus === 'error' ? 'Try Again' : 'Resend My Code'}
+              </button>
+            )}
           </div>
         </div>
       </div>

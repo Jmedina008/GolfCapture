@@ -839,6 +839,72 @@ app.get('/api/rewards/:code', async (req, res) => {
   }
 });
 
+// POST /api/rewards/resend - Resend reward code email
+app.post('/api/rewards/resend', captureLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email required' });
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const result = await pool.query(`
+      SELECT cap.reward_code, cap.reward_type, c.first_name
+      FROM captures cap
+      JOIN customers c ON cap.customer_id = c.id
+      WHERE c.email = $1
+      ORDER BY cap.created_at DESC
+      LIMIT 1
+    `, [normalizedEmail]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No reward found for this email' });
+    }
+
+    const { reward_code, reward_type, first_name } = result.rows[0];
+    const rewardMap = {
+      free_beer: { description: 'Free beer after your round', emoji: '🍺' },
+      free_soft_drink: { description: 'Free soft drink or water', emoji: '🥤' },
+      pro_shop_5: { description: '$5 Pro Shop credit', emoji: '🏌️' },
+      food_bev_5: { description: '$5 Food & Bev credit', emoji: '🍔' }
+    };
+    const reward = rewardMap[reward_type] || rewardMap.free_beer;
+
+    if (process.env.SENDGRID_API_KEY) {
+      await sgMail.send({
+        to: normalizedEmail,
+        from: FROM_EMAIL,
+        subject: `Your Crescent Pointe Reward Code: ${reward_code}`,
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
+            <div style="background: linear-gradient(135deg, #166534, #15803d); padding: 24px; border-radius: 16px 16px 0 0; text-align: center;">
+              <h1 style="color: white; margin: 0; font-size: 22px;">Crescent Pointe Golf Club</h1>
+              <p style="color: #bbf7d0; margin: 8px 0 0; font-size: 14px;">Here's your reward code again!</p>
+            </div>
+            <div style="background: #ffffff; padding: 24px; border: 1px solid #e5e7eb; border-top: none;">
+              <p style="color: #374151; font-size: 16px; margin: 0 0 8px;">Hi ${first_name || 'there'},</p>
+              <p style="color: #6b7280; font-size: 14px; margin: 0 0 20px;">Show this code to any staff member to redeem:</p>
+              <div style="background: #f3f4f6; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 16px;">
+                <p style="font-size: 32px; font-weight: bold; font-family: monospace; color: #166534; margin: 0; letter-spacing: 4px;">${reward_code}</p>
+              </div>
+              <div style="background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 12px; text-align: center;">
+                <p style="margin: 0; font-size: 18px;">${reward.emoji} ${reward.description}</p>
+              </div>
+            </div>
+            <div style="background: #f9fafb; padding: 16px; border-radius: 0 0 16px 16px; border: 1px solid #e5e7eb; border-top: none; text-align: center;">
+              <p style="color: #9ca3af; font-size: 11px; margin: 0;">Crescent Pointe Golf Club &bull; Myrtle Beach, SC</p>
+            </div>
+          </div>
+        `
+      });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Resend reward error:', error);
+    res.status(500).json({ error: 'Failed to resend. Please ask a staff member for help.' });
+  }
+});
+
 // ============================================
 // IMPORT ROUTES
 // ============================================

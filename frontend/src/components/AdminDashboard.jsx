@@ -569,51 +569,53 @@ export default function AdminDashboard({ user, onLogout }) {
             </div>
           </div>
 
-          {/* Redeem Code Input */}
+          {/* Actions */}
           <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={redeemCode}
-              onChange={(e) => setRedeemCode(e.target.value.toUpperCase())}
-              placeholder="Enter code"
-              className="px-3 py-2 border border-gray-300 rounded-lg text-sm w-32 font-mono"
-            />
-            <button
-              onClick={handleRedeem}
-              className="bg-amber-500 hover:bg-amber-600 text-white px-4 py-2 rounded-lg text-sm font-medium"
-            >
-              Redeem
-            </button>
             <button
               onClick={handleExport}
-              className="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center gap-2"
+              className="hidden sm:flex bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-medium items-center gap-2"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
               </svg>
               Export
             </button>
-            <div className="border-l border-gray-300 h-8 mx-2"></div>
-            <div className="flex items-center gap-3">
-              {user && (
-                <span className="text-sm text-gray-600">
-                  {user.name}
-                </span>
-              )}
-              <button
-                onClick={onLogout}
-                className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"
-              >
-                Logout
-              </button>
-            </div>
+            {user && (
+              <span className="hidden sm:inline text-sm text-gray-600">{user.name}</span>
+            )}
+            <button
+              onClick={onLogout}
+              className="bg-gray-200 hover:bg-gray-300 text-gray-700 px-3 py-2 rounded-lg text-sm font-medium"
+            >
+              Logout
+            </button>
+          </div>
+        </div>
+
+        {/* Redeem Code Bar — full width, mobile-optimized */}
+        <div className="px-4 py-3 bg-amber-50 border-t border-amber-100">
+          <div className="max-w-7xl mx-auto flex gap-2">
+            <input
+              type="text"
+              value={redeemCode}
+              onChange={(e) => setRedeemCode(e.target.value.toUpperCase())}
+              placeholder="Enter reward code"
+              className="flex-1 px-4 py-3 border-2 border-amber-300 rounded-xl text-base font-mono text-center tracking-widest focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none"
+              autoComplete="off"
+            />
+            <button
+              onClick={handleRedeem}
+              className="bg-amber-500 hover:bg-amber-600 active:bg-amber-700 text-white px-6 py-3 rounded-xl text-base font-semibold transition"
+            >
+              Redeem
+            </button>
           </div>
         </div>
 
         {/* Redeem Result Toast */}
         {redeemResult && (
-          <div className={`px-4 py-2 text-center text-sm ${redeemResult.success ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-            {redeemResult.message}
+          <div className={`px-4 py-3 text-center font-medium ${redeemResult.success ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+            {redeemResult.success ? '✓ ' : '✗ '}{redeemResult.message}
           </div>
         )}
       </header>
