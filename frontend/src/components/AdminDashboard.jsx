@@ -848,7 +848,7 @@ export default function AdminDashboard({ user, onLogout }) {
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {filteredCustomers.map((customer) => (
-                      <tr key={customer.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => fetchCustomerDetail(customer.id)}
+                      <tr key={customer.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => fetchCustomerDetail(customer.id)}>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-3">
                             <div className={`w-8 h-8 rounded-full flex items-center justify-center ${customer.is_membership_prospect ? 'bg-green-100' : 'bg-gray-100'}`}>
