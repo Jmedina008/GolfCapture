@@ -88,6 +88,16 @@ export default function AdminDashboard({ user, onLogout }) {
   const [viewingSegmentId, setViewingSegmentId] = useState(null);
   const [segmentCustomers, setSegmentCustomers] = useState([]);
 
+  // Customer detail
+  const [selectedCustomer, setSelectedCustomer] = useState(null);
+  const [customerDetailLoading, setCustomerDetailLoading] = useState(false);
+
+  // Import
+  const [importFile, setImportFile] = useState(null);
+  const [importSource, setImportSource] = useState('golfnow');
+  const [importLoading, setImportLoading] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+
   // Revenue
   const [revenueEvents, setRevenueEvents] = useState([]);
   const [revenueSummary, setRevenueSummary] = useState(null);
@@ -162,8 +172,55 @@ export default function AdminDashboard({ user, onLogout }) {
     setTimeout(() => setRedeemResult(null), 3000);
   };
 
+  const fetchCustomerDetail = async (customerId) => {
+    setCustomerDetailLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/api/customers/${customerId}`, { headers: authHeaders() });
+      const data = await res.json();
+      setSelectedCustomer(data);
+    } catch (err) {
+      console.error('Failed to fetch customer:', err);
+    } finally {
+      setCustomerDetailLoading(false);
+    }
+  };
+
   const handleExport = async () => {
-    window.open(`${API_URL}/api/export/customers`, '_blank');
+    const params = new URLSearchParams();
+    if (filterBookingSource !== 'all') params.set('bookingSource', filterBookingSource);
+    if (filterType === 'local') params.set('isLocal', 'true');
+    if (filterType === 'visitor') params.set('isLocal', 'false');
+    if (filterType === 'prospect') params.set('isProspect', 'true');
+    if (searchTerm) params.set('search', searchTerm);
+    const qs = params.toString();
+    window.open(`${API_URL}/api/export/customers${qs ? '?' + qs : ''}`, '_blank');
+  };
+
+  const handleImport = async () => {
+    if (!importFile) return;
+    setImportLoading(true);
+    setImportResult(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', importFile);
+      formData.append('source', importSource);
+      formData.append('courseSlug', 'crescent-pointe');
+      const res = await fetch(`${API_URL}/api/import`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('adminToken')}` },
+        body: formData
+      });
+      const data = await res.json();
+      setImportResult(data);
+      if (data.success) {
+        setImportFile(null);
+        fetchData();
+      }
+    } catch (err) {
+      setImportResult({ success: false, error: err.message });
+    } finally {
+      setImportLoading(false);
+    }
   };
 
   const authHeaders = () => ({
@@ -715,7 +772,7 @@ export default function AdminDashboard({ user, onLogout }) {
               {tab === 'customers' ? 'All Customers' : tab === 'prospects' ? 'Membership Prospects' : 'QR Locations'}
             </button>
           ))}
-          {user?.role === 'admin' && ['pipeline', 'segments', 'email', 'revenue'].map(tab => (
+          {user?.role === 'admin' && ['pipeline', 'segments', 'email', 'revenue', 'import'].map(tab => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
@@ -791,7 +848,7 @@ export default function AdminDashboard({ user, onLogout }) {
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {filteredCustomers.map((customer) => (
-                      <tr key={customer.id} className="hover:bg-gray-50">
+                      <tr key={customer.id} className="hover:bg-gray-50 cursor-pointer" onClick={() => fetchCustomerDetail(customer.id)}
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-3">
                             <div className={`w-8 h-8 rounded-full flex items-center justify-center ${customer.is_membership_prospect ? 'bg-green-100' : 'bg-gray-100'}`}>
@@ -968,12 +1025,13 @@ export default function AdminDashboard({ user, onLogout }) {
                   <p className="text-xs text-gray-400">{location.capture_count || 0} total</p>
                   <div className="mt-4 space-y-2">
                     <a
-                      href={`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(window.location.origin + '/capture?location=' + location.id)}`}
+                      href={`https://api.qrserver.com/v1/create-qr-code/?size=1000x1000&data=${encodeURIComponent(window.location.origin + '/capture?location=' + location.id)}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="block w-full text-center text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-2 rounded-lg transition"
+                      download={`qr-${location.name?.toLowerCase().replace(/\s+/g, '-')}.png`}
                     >
-                      Download QR Code
+                      Download QR Code (Print-Ready)
                     </a>
                     {user?.role === 'admin' && (
                       <button
@@ -1706,6 +1764,96 @@ export default function AdminDashboard({ user, onLogout }) {
           </div>
         )}
 
+        {/* Import Tab */}
+        {activeTab === 'import' && user?.role === 'admin' && (
+          <div className="bg-white rounded-xl border border-gray-200 p-6">
+            <h2 className="text-lg font-bold text-gray-900 mb-1">Import Customers</h2>
+            <p className="text-sm text-gray-500 mb-6">Upload a CSV file from GolfNow, ClubEssential, or your own spreadsheet.</p>
+
+            <div className="space-y-4 max-w-md">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Data Source</label>
+                <select
+                  value={importSource}
+                  onChange={(e) => setImportSource(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500 outline-none bg-white"
+                >
+                  <option value="golfnow">GolfNow Export</option>
+                  <option value="clubessential">ClubEssential Export</option>
+                  <option value="generic">Generic CSV</option>
+                </select>
+                <p className="text-xs text-gray-400 mt-1">
+                  {importSource === 'golfnow' && 'Expects columns: First Name, Last Name, Email, Phone, Zip'}
+                  {importSource === 'clubessential' && 'Expects columns: FirstName, LastName, Email, Phone, PostalCode'}
+                  {importSource === 'generic' && 'Expects columns: first_name, last_name, email, phone, zip'}
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">CSV File</label>
+                <input
+                  type="file"
+                  accept=".csv"
+                  onChange={(e) => { setImportFile(e.target.files[0]); setImportResult(null); }}
+                  className="w-full text-sm text-gray-600 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-green-50 file:text-green-700 hover:file:bg-green-100"
+                />
+              </div>
+
+              <button
+                onClick={handleImport}
+                disabled={!importFile || importLoading}
+                className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-300 text-white font-medium py-2.5 rounded-lg text-sm transition flex items-center justify-center gap-2"
+              >
+                {importLoading ? (
+                  <>
+                    <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                    </svg>
+                    Importing...
+                  </>
+                ) : 'Upload & Import'}
+              </button>
+            </div>
+
+            {importResult && (
+              <div className={`mt-6 rounded-lg p-4 ${importResult.success ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}>
+                {importResult.success ? (
+                  <div>
+                    <p className="text-sm font-semibold text-green-800 mb-2">Import Complete</p>
+                    <div className="grid grid-cols-3 gap-3 text-center">
+                      <div>
+                        <p className="text-2xl font-bold text-green-700">{importResult.stats?.newCustomers || 0}</p>
+                        <p className="text-xs text-green-600">New</p>
+                      </div>
+                      <div>
+                        <p className="text-2xl font-bold text-blue-700">{importResult.stats?.matchedCustomers || 0}</p>
+                        <p className="text-xs text-blue-600">Updated</p>
+                      </div>
+                      <div>
+                        <p className="text-2xl font-bold text-gray-500">{importResult.stats?.skippedRows || 0}</p>
+                        <p className="text-xs text-gray-500">Skipped</p>
+                      </div>
+                    </div>
+                    {importResult.stats?.errors?.length > 0 && (
+                      <div className="mt-3 border-t border-green-200 pt-3">
+                        <p className="text-xs font-medium text-amber-700 mb-1">Warnings ({importResult.stats.errors.length}):</p>
+                        <div className="max-h-32 overflow-y-auto space-y-1">
+                          {importResult.stats.errors.map((err, i) => (
+                            <p key={i} className="text-xs text-amber-600">Row {err.row}: {err.message}</p>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-sm text-red-700">{importResult.error || 'Import failed. Please check your file format.'}</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Team Tab */}
         {activeTab === 'team' && user?.role === 'admin' && (
           <div className="space-y-4">
@@ -1870,6 +2018,138 @@ export default function AdminDashboard({ user, onLogout }) {
                 <div className="px-4 py-8 text-center text-gray-500">
                   No team members found.
                 </div>
+              )}
+            </div>
+          </div>
+        )}
+        {/* Customer Detail Modal */}
+        {selectedCustomer && (
+          <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setSelectedCustomer(null)}>
+            <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+              {customerDetailLoading ? (
+                <div className="p-8 text-center text-gray-500">Loading...</div>
+              ) : (
+                <>
+                  <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-11 h-11 rounded-full flex items-center justify-center ${selectedCustomer.is_membership_prospect ? 'bg-green-100' : 'bg-gray-100'}`}>
+                        <span className={`text-sm font-bold ${selectedCustomer.is_membership_prospect ? 'text-green-700' : 'text-gray-600'}`}>
+                          {selectedCustomer.first_name?.[0]}{selectedCustomer.last_name?.[0]}
+                        </span>
+                      </div>
+                      <div>
+                        <h2 className="text-lg font-bold text-gray-900">{selectedCustomer.first_name} {selectedCustomer.last_name}</h2>
+                        <p className="text-sm text-gray-500">{selectedCustomer.email}</p>
+                      </div>
+                    </div>
+                    <button onClick={() => setSelectedCustomer(null)} className="text-gray-400 hover:text-gray-600 p-1">
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+
+                  <div className="p-5 space-y-4">
+                    {/* Contact & Profile */}
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-gray-50 rounded-lg p-3">
+                        <p className="text-xs text-gray-500">Phone</p>
+                        <p className="text-sm font-medium text-gray-900">{selectedCustomer.phone || 'N/A'}</p>
+                      </div>
+                      <div className="bg-gray-50 rounded-lg p-3">
+                        <p className="text-xs text-gray-500">Zip Code</p>
+                        <p className="text-sm font-medium text-gray-900">{selectedCustomer.zip || 'N/A'}</p>
+                      </div>
+                      <div className="bg-gray-50 rounded-lg p-3">
+                        <p className="text-xs text-gray-500">Booking Source</p>
+                        <p className="text-sm font-medium text-gray-900">{bookingSourceLabels[selectedCustomer.booking_source] || 'Unknown'}</p>
+                      </div>
+                      <div className="bg-gray-50 rounded-lg p-3">
+                        <p className="text-xs text-gray-500">Play Frequency</p>
+                        <p className="text-sm font-medium text-gray-900">{playFrequencyLabels[selectedCustomer.play_frequency] || 'Unknown'}</p>
+                      </div>
+                    </div>
+
+                    {/* Score & Badges */}
+                    <div className="flex flex-wrap gap-2">
+                      <span className={`text-xs px-2.5 py-1 rounded-full font-medium ${selectedCustomer.is_local ? 'bg-green-100 text-green-700' : 'bg-orange-100 text-orange-700'}`}>
+                        {selectedCustomer.is_local ? 'Local' : 'Visitor'}
+                      </span>
+                      {selectedCustomer.is_membership_prospect && (
+                        <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-green-100 text-green-700">Membership Prospect</span>
+                      )}
+                      <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-blue-100 text-blue-700">
+                        Score: {selectedCustomer.membership_score || 0}
+                      </span>
+                      <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-gray-100 text-gray-700">
+                        {selectedCustomer.visit_count || 1} visit{(selectedCustomer.visit_count || 1) !== 1 ? 's' : ''}
+                      </span>
+                      {selectedCustomer.member_elsewhere && (
+                        <span className="text-xs px-2.5 py-1 rounded-full font-medium bg-amber-100 text-amber-700">Member Elsewhere</span>
+                      )}
+                    </div>
+
+                    {/* Tags */}
+                    {selectedCustomer.tags?.length > 0 && (
+                      <div>
+                        <p className="text-xs font-semibold text-gray-500 uppercase mb-1.5">Tags</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {selectedCustomer.tags.map((tag) => (
+                            <span key={tag.id} className="text-xs px-2 py-1 rounded bg-purple-100 text-purple-700">{tag.name}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Captures / Reward History */}
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 uppercase mb-2">Reward History</p>
+                      {selectedCustomer.captures?.length > 0 ? (
+                        <div className="space-y-2">
+                          {selectedCustomer.captures.map((cap) => {
+                            const rewardLabels = {
+                              free_beer: '🍺 Free Beer',
+                              free_soft_drink: '🥤 Soft Drink',
+                              pro_shop_5: '🏌️ Pro Shop $5',
+                              food_bev_5: '🍔 Food & Bev $5'
+                            };
+                            return (
+                              <div key={cap.id} className="bg-gray-50 rounded-lg p-3 flex items-center justify-between">
+                                <div>
+                                  <p className="text-sm font-medium text-gray-900">
+                                    {rewardLabels[cap.reward_type] || cap.reward_type || 'Reward'}
+                                  </p>
+                                  <p className="text-xs text-gray-500">
+                                    {cap.location_name || 'Unknown location'} &middot; {new Date(cap.created_at).toLocaleDateString()}
+                                  </p>
+                                  <p className="text-xs font-mono text-gray-400 mt-0.5">{cap.reward_code}</p>
+                                </div>
+                                <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                                  cap.reward_redeemed
+                                    ? 'bg-green-100 text-green-700'
+                                    : 'bg-amber-100 text-amber-700'
+                                }`}>
+                                  {cap.reward_redeemed ? 'Redeemed' : 'Unredeemed'}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-gray-400">No captures yet.</p>
+                      )}
+                    </div>
+
+                    {/* Source & Dates */}
+                    <div className="border-t border-gray-200 pt-3 text-xs text-gray-400 space-y-1">
+                      <p>Source: {selectedCustomer.source || 'capture'}</p>
+                      <p>Added: {new Date(selectedCustomer.created_at).toLocaleDateString()}</p>
+                      {selectedCustomer.last_visit_at && (
+                        <p>Last visit: {new Date(selectedCustomer.last_visit_at).toLocaleDateString()}</p>
+                      )}
+                    </div>
+                  </div>
+                </>
               )}
             </div>
           </div>

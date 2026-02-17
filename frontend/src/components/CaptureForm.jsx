@@ -22,6 +22,7 @@ export default function CaptureForm() {
   });
   const [maskedEmail, setMaskedEmail] = useState('');
   const [errors, setErrors] = useState({});
+  const [submitError, setSubmitError] = useState('');
   const [locationId, setLocationId] = useState(null);
   const [chosenReward, setChosenReward] = useState(null);
 
@@ -72,11 +73,16 @@ export default function CaptureForm() {
     if (!validateForm()) return;
     
     setStep('submitting');
-    
+    setSubmitError('');
+
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+
       const response = await fetch(`${API_URL}/api/capture`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           courseSlug: 'crescent-pointe',
           locationId,
@@ -93,7 +99,12 @@ export default function CaptureForm() {
           chosenReward
         })
       });
-      
+      clearTimeout(timeout);
+
+      if (!response.ok && response.status === 429) {
+        throw new Error('Too many attempts. Please wait a few minutes and try again.');
+      }
+
       const data = await response.json();
 
       if (data.success) {
@@ -111,7 +122,11 @@ export default function CaptureForm() {
     } catch (error) {
       console.error('Capture error:', error);
       setStep('form');
-      alert('Something went wrong. Please try again.');
+      if (error.name === 'AbortError') {
+        setSubmitError('Request timed out. Please check your connection and try again.');
+      } else {
+        setSubmitError(error.message || 'Something went wrong. Please try again.');
+      }
     }
   };
 
@@ -144,6 +159,12 @@ export default function CaptureForm() {
               Join our list. Takes 30 seconds.
             </p>
             
+            {submitError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-3">
+                <p className="text-red-700 text-sm text-center">{submitError}</p>
+              </div>
+            )}
+
             <form onSubmit={handleSubmit} className="space-y-3">
               <div className="grid grid-cols-2 gap-2">
                 <div>
@@ -214,7 +235,7 @@ export default function CaptureForm() {
 
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1.5">How did you book today?</label>
-                <div className="grid grid-cols-4 gap-1.5">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                   {[
                     { value: 'golfnow', label: 'GolfNow' },
                     { value: 'website', label: 'Website' },
@@ -270,7 +291,7 @@ export default function CaptureForm() {
 
               <div>
                 <label className="block text-xs font-medium text-gray-600 mb-1.5">How often do you play golf?</label>
-                <div className="grid grid-cols-3 gap-1.5">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
                   {[
                     { value: 'rarely', label: 'Few times/year' },
                     { value: 'monthly', label: 'Monthly' },

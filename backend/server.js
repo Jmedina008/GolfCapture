@@ -780,7 +780,7 @@ app.get('/api/locations/:id/qr', async (req, res) => {
     const qrUrl = `${baseUrl}/capture?location=${id}`;
     
     // Using QR code API service
-    const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(qrUrl)}`;
+    const qrImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=1000x1000&data=${encodeURIComponent(qrUrl)}`;
     
     res.json({ 
       qrUrl,
