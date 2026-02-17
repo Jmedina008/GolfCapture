@@ -23,6 +23,14 @@ export default function CaptureForm() {
   });
   const [errors, setErrors] = useState({});
   const [locationId, setLocationId] = useState(null);
+  const [chosenReward, setChosenReward] = useState(null);
+
+  const rewardOptions = [
+    { value: 'free_beer', label: 'Free Beer', emoji: '🍺', description: 'A cold one after your round' },
+    { value: 'free_soft_drink', label: 'Free Soft Drink', emoji: '🥤', description: 'Any fountain drink or water' },
+    { value: 'pro_shop_5', label: '$5 Pro Shop Credit', emoji: '🏌️', description: 'Toward any pro shop purchase' },
+    { value: 'food_bev_5', label: '$5 Food & Bev Credit', emoji: '🍔', description: 'At the clubhouse restaurant' }
+  ];
 
   // Get location from URL params
   useEffect(() => {
@@ -47,6 +55,7 @@ export default function CaptureForm() {
     }
     if (!formData.bookingSource) newErrors.bookingSource = 'Please select one';
     if (formData.isLocal === null) newErrors.isLocal = 'Please select one';
+    if (!chosenReward) newErrors.chosenReward = 'Pick your reward!';
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -80,7 +89,8 @@ export default function CaptureForm() {
           isLocal: formData.isLocal,
           playFrequency: formData.playFrequency,
           memberElsewhere: formData.memberElsewhere,
-          firstTime: formData.firstTime
+          firstTime: formData.firstTime,
+          chosenReward
         })
       });
       
@@ -131,7 +141,7 @@ export default function CaptureForm() {
       <div className="min-h-screen bg-gradient-to-b from-green-800 to-green-900 flex flex-col">
         <div className="bg-green-900/50 px-6 py-4 text-center">
           <h1 className="text-xl font-bold text-white">Crescent Pointe</h1>
-          <p className="text-green-200 mt-1 text-sm">Get a free reward on us!</p>
+          <p className="text-green-200 mt-1 text-sm">Pick a free reward on us!</p>
         </div>
         
         <div className="flex-1 px-4 py-3 overflow-auto">
@@ -349,6 +359,37 @@ export default function CaptureForm() {
                 </div>
               </div>
 
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1.5">Pick your reward!</label>
+                {errors.chosenReward && <p className="text-xs text-red-500 mb-1">{errors.chosenReward}</p>}
+                <div className="grid grid-cols-2 gap-2">
+                  {rewardOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => {
+                        setChosenReward(option.value);
+                        if (errors.chosenReward) setErrors({ ...errors, chosenReward: null });
+                      }}
+                      className={`p-3 rounded-lg border-2 text-left transition ${
+                        chosenReward === option.value
+                          ? 'border-green-600 bg-green-50'
+                          : errors.chosenReward
+                            ? 'border-red-300'
+                            : 'border-gray-300'
+                      }`}
+                      disabled={step === 'submitting'}
+                    >
+                      <span className="text-xl block mb-1">{option.emoji}</span>
+                      <span className={`text-xs font-semibold block ${
+                        chosenReward === option.value ? 'text-green-700' : 'text-gray-800'
+                      }`}>{option.label}</span>
+                      <span className="text-xs text-gray-500 block">{option.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <button
                 type="submit"
                 disabled={step === 'submitting'}
@@ -363,7 +404,7 @@ export default function CaptureForm() {
                     Getting your code...
                   </>
                 ) : (
-                  'Get My Free Beer'
+                  'Claim My Reward'
                 )}
               </button>
             </form>

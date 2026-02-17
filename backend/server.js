@@ -7,6 +7,13 @@ const { v4: uuidv4 } = require('uuid');
 const dns = require('dns');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const sgMail = require('@sendgrid/mail');
+
+// Configure SendGrid
+if (process.env.SENDGRID_API_KEY) {
+  sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+}
+const FROM_EMAIL = process.env.FROM_EMAIL || 'noreply@crescentpointegolf.com';
 
 // Force IPv4 for DNS resolution (fixes Railway + Supabase connectivity)
 dns.setDefaultResultOrder('ipv4first');
@@ -101,6 +108,102 @@ function calculateMembershipScore(customer) {
   return Math.min(score, 100);
 }
 
+// Helper: Render email template with placeholders
+function renderTemplate(template, data) {
+  let html = template.body_html;
+  let subject = template.subject;
+  const replacements = {
+    '{{first_name}}': data.first_name || '',
+    '{{last_name}}': data.last_name || '',
+    '{{reward_code}}': data.reward_code || '',
+    '{{visit_count}}': String(data.visit_count || 1)
+  };
+  for (const [key, value] of Object.entries(replacements)) {
+    html = html.split(key).join(value);
+    subject = subject.split(key).join(value);
+  }
+  return { subject, body_html: html };
+}
+
+// Helper: Queue an email for a customer
+async function queueEmail(client, courseId, customerId, templateType, extraData = {}) {
+  try {
+    // Check opt-out
+    const custResult = await client.query(
+      'SELECT first_name, last_name, email, visit_count, opted_out_email FROM customers WHERE id = $1',
+      [customerId]
+    );
+    if (custResult.rows.length === 0 || !custResult.rows[0].email || custResult.rows[0].opted_out_email) return;
+    const customer = custResult.rows[0];
+
+    // Get template
+    const tmplResult = await client.query(
+      'SELECT * FROM email_templates WHERE course_id = $1 AND type = $2 AND is_active = true LIMIT 1',
+      [courseId, templateType]
+    );
+    if (tmplResult.rows.length === 0) return;
+    const template = tmplResult.rows[0];
+
+    const data = { ...customer, ...extraData };
+    const rendered = renderTemplate(template, data);
+
+    const scheduledFor = template.delay_hours > 0
+      ? new Date(Date.now() + template.delay_hours * 3600000).toISOString()
+      : new Date().toISOString();
+
+    await client.query(`
+      INSERT INTO email_queue (course_id, customer_id, template_id, to_email, subject, body_html, scheduled_for)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `, [courseId, customerId, template.id, customer.email, rendered.subject, rendered.body_html, scheduledFor]);
+  } catch (err) {
+    console.error('Queue email error:', err.message);
+  }
+}
+
+// Helper: Build segment filter SQL from JSONB filters
+function buildSegmentFilterSQL(filters, params, startIndex) {
+  const conditions = [];
+  let idx = startIndex;
+
+  if (filters.booking_source && filters.booking_source.length > 0) {
+    conditions.push(`c.booking_source = ANY($${idx})`);
+    params.push(filters.booking_source);
+    idx++;
+  }
+  if (filters.is_local !== undefined && filters.is_local !== null) {
+    conditions.push(`c.is_local = $${idx}`);
+    params.push(filters.is_local);
+    idx++;
+  }
+  if (filters.play_frequency && filters.play_frequency.length > 0) {
+    conditions.push(`c.play_frequency = ANY($${idx})`);
+    params.push(filters.play_frequency);
+    idx++;
+  }
+  if (filters.min_score) {
+    conditions.push(`c.membership_score >= $${idx}`);
+    params.push(parseInt(filters.min_score));
+    idx++;
+  }
+  if (filters.max_days_since_visit) {
+    conditions.push(`c.last_visit_at >= NOW() - INTERVAL '1 day' * $${idx}`);
+    params.push(parseInt(filters.max_days_since_visit));
+    idx++;
+  }
+  if (filters.member_elsewhere !== undefined && filters.member_elsewhere !== null) {
+    conditions.push(`c.member_elsewhere = $${idx}`);
+    params.push(filters.member_elsewhere);
+    idx++;
+  }
+  if (filters.min_visits) {
+    conditions.push(`c.visit_count >= $${idx}`);
+    params.push(parseInt(filters.min_visits));
+    idx++;
+  }
+
+  return { conditions, params, nextIndex: idx };
+}
+
 // ============================================
 // CAPTURE ROUTES
 // ============================================
@@ -124,7 +227,8 @@ app.post('/api/capture', async (req, res) => {
       isLocal,
       playFrequency,
       memberElsewhere,
-      firstTime
+      firstTime,
+      chosenReward
     } = req.body;
     
     // Get course
@@ -256,29 +360,26 @@ app.post('/api/capture', async (req, res) => {
     // Generate reward code
     const rewardCode = generateRewardCode();
 
-    // Get location reward info (if location specified)
-    let rewardType = 'free_beer';
-    let rewardDescription = 'Free beer after your round';
-    let rewardEmoji = '🍺';
+    // Resolve reward based on customer choice
+    const rewardMap = {
+      free_beer: { type: 'free_beer', description: 'Free beer after your round', emoji: '🍺' },
+      free_soft_drink: { type: 'free_soft_drink', description: 'Free soft drink or water', emoji: '🥤' },
+      pro_shop_5: { type: 'pro_shop_5', description: '$5 Pro Shop credit', emoji: '🏌️' },
+      food_bev_5: { type: 'food_bev_5', description: '$5 Food & Bev credit', emoji: '🍔' }
+    };
 
-    if (locationId) {
-      const locationResult = await client.query(
-        'SELECT reward_type, reward_description, reward_emoji FROM locations WHERE id = $1',
-        [locationId]
-      );
-      if (locationResult.rows.length > 0) {
-        rewardType = locationResult.rows[0].reward_type || rewardType;
-        rewardDescription = locationResult.rows[0].reward_description || rewardDescription;
-        rewardEmoji = locationResult.rows[0].reward_emoji || rewardEmoji;
-      }
-    }
+    const chosenRewardInfo = rewardMap[chosenReward] || rewardMap.free_beer;
+    let rewardType = chosenRewardInfo.type;
+    let rewardDescription = chosenRewardInfo.description;
+    let rewardEmoji = chosenRewardInfo.emoji;
 
     // Create capture record
-    await client.query(`
+    const captureResult = await client.query(`
       INSERT INTO captures (
         course_id, customer_id, location_id, form_data, reward_code, reward_type,
         ip_address, user_agent
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING id
     `, [
       courseId,
       customerId,
@@ -289,8 +390,44 @@ app.post('/api/capture', async (req, res) => {
       req.ip,
       req.get('User-Agent')
     ]);
+    const captureId = captureResult.rows[0].id;
+
+    // Auto-add to pipeline if prospect (score >= 60 + local)
+    if (isProspect) {
+      await client.query(`
+        INSERT INTO prospect_pipeline (course_id, customer_id, status)
+        VALUES ($1, $2, 'new')
+        ON CONFLICT (customer_id) DO NOTHING
+      `, [courseId, customerId]);
+    }
 
     await client.query('COMMIT');
+
+    // Queue emails (after COMMIT so they reference committed data)
+    const emailClient = await pool.connect();
+    try {
+      const updatedCustomer = await emailClient.query('SELECT * FROM customers WHERE id = $1', [customerId]);
+      const cust = updatedCustomer.rows[0];
+
+      // Same-day thank you
+      await queueEmail(emailClient, courseId, customerId, 'same_day_thanks', { reward_code: rewardCode });
+
+      // Follow-up based on local/visitor (72h delay built into template)
+      if (cust.is_local) {
+        await queueEmail(emailClient, courseId, customerId, 'followup_local', { reward_code: rewardCode });
+      } else {
+        await queueEmail(emailClient, courseId, customerId, 'followup_visitor', { reward_code: rewardCode });
+      }
+
+      // Repeat visitor milestone
+      if (cust.visit_count === 3) {
+        await queueEmail(emailClient, courseId, customerId, 'repeat_visitor_3', { reward_code: rewardCode });
+      }
+    } catch (emailErr) {
+      console.error('Email queueing error (non-fatal):', emailErr.message);
+    } finally {
+      emailClient.release();
+    }
 
     res.json({
       success: true,
@@ -611,9 +748,16 @@ app.post('/api/rewards/:code/redeem', async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Code not found or already redeemed' });
     }
-    
-    res.json({ success: true, capture: result.rows[0] });
-    
+
+    // Update A/B test result if this capture was part of a test
+    const capture = result.rows[0];
+    await pool.query(
+      'UPDATE ab_test_results SET redeemed = true WHERE capture_id = $1',
+      [capture.id]
+    );
+
+    res.json({ success: true, capture });
+
   } catch (error) {
     console.error('Redeem error:', error);
     res.status(500).json({ error: error.message });
@@ -964,7 +1108,17 @@ app.get('/api/analytics', async (req, res) => {
       WHERE course_id = $1 AND play_frequency IS NOT NULL
       GROUP BY play_frequency
     `, [courseId]);
-    
+
+    // Reward choice breakdown
+    const rewardChoices = await pool.query(`
+      SELECT reward_type, COUNT(*) as count,
+        COUNT(*) FILTER (WHERE reward_redeemed = true) as redeemed
+      FROM captures
+      WHERE course_id = $1 AND reward_type IS NOT NULL
+      GROUP BY reward_type
+      ORDER BY count DESC
+    `, [courseId]);
+
     const redemptionRate = redemptionStats.rows[0].total > 0
       ? Math.round((redemptionStats.rows[0].redeemed / redemptionStats.rows[0].total) * 100)
       : 0;
@@ -978,7 +1132,8 @@ app.get('/api/analytics', async (req, res) => {
       bookingSources: bookingSources.rows,
       localVsVisitor: localVsVisitor.rows[0],
       capturesByLocation: capturesByLocation.rows,
-      playFrequency: playFrequency.rows
+      playFrequency: playFrequency.rows,
+      rewardChoices: rewardChoices.rows
     });
     
   } catch (error) {
@@ -1338,6 +1493,721 @@ app.put('/api/auth/password', authenticateToken, async (req, res) => {
 });
 
 // ============================================
+// EMAIL ROUTES
+// ============================================
+
+// GET /api/admin/process-emails - Manual trigger to process email queue
+app.get('/api/admin/process-emails', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const result = await processEmailQueue();
+    res.json({ success: true, ...result });
+  } catch (error) {
+    console.error('Process emails error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/emails - List email activity with summary counts
+app.get('/api/admin/emails', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+
+    const summary = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE status = 'pending') as pending,
+        COUNT(*) FILTER (WHERE status = 'sent') as sent,
+        COUNT(*) FILTER (WHERE status = 'failed') as failed
+      FROM email_queue WHERE course_id = $1
+    `, [courseId]);
+
+    const emails = await pool.query(`
+      SELECT eq.*, c.first_name, c.last_name, et.name as template_name
+      FROM email_queue eq
+      LEFT JOIN customers c ON eq.customer_id = c.id
+      LEFT JOIN email_templates et ON eq.template_id = et.id
+      WHERE eq.course_id = $1
+      ORDER BY eq.created_at DESC
+      LIMIT 100
+    `, [courseId]);
+
+    res.json({
+      summary: summary.rows[0],
+      emails: emails.rows
+    });
+  } catch (error) {
+    console.error('List emails error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/email-templates - List templates
+app.get('/api/admin/email-templates', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+    const result = await pool.query(
+      'SELECT * FROM email_templates WHERE course_id = $1 ORDER BY delay_hours ASC',
+      [courseId]
+    );
+    res.json({ templates: result.rows });
+  } catch (error) {
+    console.error('List templates error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/admin/email-templates/:id - Toggle active, edit subject/body
+app.put('/api/admin/email-templates/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_active, subject, body_html } = req.body;
+
+    const fields = [];
+    const params = [];
+    let idx = 1;
+
+    if (is_active !== undefined) { fields.push(`is_active = $${idx++}`); params.push(is_active); }
+    if (subject !== undefined) { fields.push(`subject = $${idx++}`); params.push(subject); }
+    if (body_html !== undefined) { fields.push(`body_html = $${idx++}`); params.push(body_html); }
+    fields.push(`updated_at = NOW()`);
+
+    if (fields.length <= 1) {
+      return res.status(400).json({ error: 'No fields to update.' });
+    }
+
+    params.push(id);
+    const result = await pool.query(
+      `UPDATE email_templates SET ${fields.join(', ')} WHERE id = $${idx} RETURNING *`,
+      params
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Template not found' });
+    res.json({ template: result.rows[0] });
+  } catch (error) {
+    console.error('Update template error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/customers/:id/unsubscribe - Opt out + cancel pending emails
+app.put('/api/customers/:id/unsubscribe', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('UPDATE customers SET opted_out_email = true WHERE id = $1', [id]);
+    await pool.query(
+      "UPDATE email_queue SET status = 'cancelled' WHERE customer_id = $1 AND status = 'pending'",
+      [id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Unsubscribe error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// SEGMENT ROUTES
+// ============================================
+
+// GET /api/admin/segments - List segments with customer counts
+app.get('/api/admin/segments', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+    const result = await pool.query(
+      'SELECT * FROM customer_segments WHERE course_id = $1 ORDER BY created_at DESC',
+      [courseId]
+    );
+
+    // Get counts for each segment
+    const segments = [];
+    for (const seg of result.rows) {
+      const filters = seg.filters || {};
+      const params = [courseId];
+      const { conditions } = buildSegmentFilterSQL(filters, params, 2);
+      let where = 'c.course_id = $1';
+      if (conditions.length > 0) where += ' AND ' + conditions.join(' AND ');
+      const countResult = await pool.query(
+        `SELECT COUNT(*) FROM customers c WHERE ${where}`, params
+      );
+      segments.push({ ...seg, customer_count: parseInt(countResult.rows[0].count) });
+    }
+
+    res.json({ segments });
+  } catch (error) {
+    console.error('List segments error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/segments - Create segment
+app.post('/api/admin/segments', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+    const { name, description, filters } = req.body;
+
+    const result = await pool.query(`
+      INSERT INTO customer_segments (course_id, name, description, filters, created_by)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+    `, [courseId, name, description || '', JSON.stringify(filters || {}), req.user.id]);
+
+    res.json({ segment: result.rows[0] });
+  } catch (error) {
+    console.error('Create segment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/segments/:id/customers - Get customers matching segment
+app.get('/api/admin/segments/:id/customers', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const segResult = await pool.query('SELECT * FROM customer_segments WHERE id = $1', [id]);
+    if (segResult.rows.length === 0) return res.status(404).json({ error: 'Segment not found' });
+
+    const seg = segResult.rows[0];
+    const filters = seg.filters || {};
+    const params = [seg.course_id];
+    const { conditions } = buildSegmentFilterSQL(filters, params, 2);
+    let where = 'c.course_id = $1';
+    if (conditions.length > 0) where += ' AND ' + conditions.join(' AND ');
+
+    const result = await pool.query(
+      `SELECT c.* FROM customers c WHERE ${where} ORDER BY c.created_at DESC LIMIT 500`,
+      params
+    );
+
+    res.json({ customers: result.rows });
+  } catch (error) {
+    console.error('Segment customers error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/segments/:id/export - Export segment as CSV
+app.post('/api/admin/segments/:id/export', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const segResult = await pool.query('SELECT * FROM customer_segments WHERE id = $1', [id]);
+    if (segResult.rows.length === 0) return res.status(404).json({ error: 'Segment not found' });
+
+    const seg = segResult.rows[0];
+    const filters = seg.filters || {};
+    const params = [seg.course_id];
+    const { conditions } = buildSegmentFilterSQL(filters, params, 2);
+    let where = 'c.course_id = $1';
+    if (conditions.length > 0) where += ' AND ' + conditions.join(' AND ');
+
+    const result = await pool.query(
+      `SELECT c.first_name, c.last_name, c.email, c.phone, c.zip, c.booking_source, c.is_local, c.play_frequency, c.visit_count, c.membership_score FROM customers c WHERE ${where} ORDER BY c.created_at DESC`,
+      params
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'No customers in segment' });
+
+    const headers = Object.keys(result.rows[0]);
+    const csvRows = [headers.join(',')];
+    for (const row of result.rows) {
+      const values = headers.map(h => {
+        const val = row[h];
+        if (val === null || val === undefined) return '';
+        if (typeof val === 'string' && (val.includes(',') || val.includes('"'))) return `"${val.replace(/"/g, '""')}"`;
+        return val;
+      });
+      csvRows.push(values.join(','));
+    }
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="segment-${seg.name}-${Date.now()}.csv"`);
+    res.send(csvRows.join('\n'));
+  } catch (error) {
+    console.error('Export segment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/segments/:id/email - Send email to entire segment
+app.post('/api/admin/segments/:id/email', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { templateId } = req.body;
+
+    const segResult = await pool.query('SELECT * FROM customer_segments WHERE id = $1', [id]);
+    if (segResult.rows.length === 0) return res.status(404).json({ error: 'Segment not found' });
+
+    const seg = segResult.rows[0];
+    const filters = seg.filters || {};
+    const params = [seg.course_id];
+    const { conditions } = buildSegmentFilterSQL(filters, params, 2);
+    let where = 'c.course_id = $1 AND c.opted_out_email = false AND c.email IS NOT NULL';
+    if (conditions.length > 0) where += ' AND ' + conditions.join(' AND ');
+
+    const customers = await pool.query(`SELECT c.* FROM customers c WHERE ${where}`, params);
+
+    const template = await pool.query('SELECT * FROM email_templates WHERE id = $1', [templateId]);
+    if (template.rows.length === 0) return res.status(404).json({ error: 'Template not found' });
+
+    const tmpl = template.rows[0];
+    let queued = 0;
+
+    for (const cust of customers.rows) {
+      const rendered = renderTemplate(tmpl, cust);
+      await pool.query(`
+        INSERT INTO email_queue (course_id, customer_id, template_id, to_email, subject, body_html, scheduled_for)
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      `, [seg.course_id, cust.id, tmpl.id, cust.email, rendered.subject, rendered.body_html]);
+      queued++;
+    }
+
+    res.json({ success: true, queued });
+  } catch (error) {
+    console.error('Email segment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/segments/preview-count - Live count preview without saving
+app.post('/api/admin/segments/preview-count', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+    const { filters } = req.body;
+    const params = [courseId];
+    const { conditions } = buildSegmentFilterSQL(filters || {}, params, 2);
+    let where = 'c.course_id = $1';
+    if (conditions.length > 0) where += ' AND ' + conditions.join(' AND ');
+
+    const result = await pool.query(`SELECT COUNT(*) FROM customers c WHERE ${where}`, params);
+    res.json({ count: parseInt(result.rows[0].count) });
+  } catch (error) {
+    console.error('Preview count error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/admin/segments/:id - Delete segment
+app.delete('/api/admin/segments/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query('DELETE FROM customer_segments WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete segment error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// PIPELINE ROUTES
+// ============================================
+
+// GET /api/admin/pipeline - List prospects with pipeline status + summary stats
+app.get('/api/admin/pipeline', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+    const { status } = req.query;
+
+    let query = `
+      SELECT pp.*, c.first_name, c.last_name, c.email, c.phone, c.membership_score, c.visit_count
+      FROM prospect_pipeline pp
+      JOIN customers c ON pp.customer_id = c.id
+      WHERE pp.course_id = $1
+    `;
+    const params = [courseId];
+    let idx = 2;
+
+    if (status) {
+      query += ` AND pp.status = $${idx}`;
+      params.push(status);
+      idx++;
+    }
+    query += ' ORDER BY pp.last_activity_at DESC';
+
+    const result = await pool.query(query, params);
+
+    const summary = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE status = 'new') as new_count,
+        COUNT(*) FILTER (WHERE status = 'contacted') as contacted_count,
+        COUNT(*) FILTER (WHERE status = 'tour_scheduled') as tour_count,
+        COUNT(*) FILTER (WHERE status = 'joined') as joined_count,
+        COUNT(*) FILTER (WHERE status = 'passed') as passed_count
+      FROM prospect_pipeline WHERE course_id = $1
+    `, [courseId]);
+
+    res.json({
+      prospects: result.rows,
+      summary: summary.rows[0]
+    });
+  } catch (error) {
+    console.error('Pipeline list error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/admin/pipeline/:customerId - Update status/notes/assigned_to
+app.put('/api/admin/pipeline/:customerId', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { status, notes, assigned_to } = req.body;
+
+    const fields = ['last_activity_at = NOW()', 'updated_at = NOW()'];
+    const params = [];
+    let idx = 1;
+
+    if (status !== undefined) { fields.push(`status = $${idx++}`); params.push(status); }
+    if (notes !== undefined) { fields.push(`notes = $${idx++}`); params.push(notes); }
+    if (assigned_to !== undefined) { fields.push(`assigned_to = $${idx++}`); params.push(assigned_to); }
+
+    params.push(customerId);
+    const result = await pool.query(
+      `UPDATE prospect_pipeline SET ${fields.join(', ')} WHERE customer_id = $${idx} RETURNING *`,
+      params
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Pipeline entry not found' });
+    res.json({ pipeline: result.rows[0] });
+  } catch (error) {
+    console.error('Pipeline update error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/pipeline - Manually add customer to pipeline
+app.post('/api/admin/pipeline', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+    const { customerId } = req.body;
+
+    const result = await pool.query(`
+      INSERT INTO prospect_pipeline (course_id, customer_id, status)
+      VALUES ($1, $2, 'new')
+      ON CONFLICT (customer_id) DO NOTHING
+      RETURNING *
+    `, [courseId, customerId]);
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'Customer already in pipeline' });
+    }
+    res.json({ pipeline: result.rows[0] });
+  } catch (error) {
+    console.error('Pipeline add error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// A/B TESTING ROUTES
+// ============================================
+
+// GET /api/admin/ab-tests - List tests with variant counts + redemption rates
+app.get('/api/admin/ab-tests', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+
+    const tests = await pool.query(`
+      SELECT ab.*, l.name as location_name
+      FROM ab_tests ab
+      JOIN locations l ON ab.location_id = l.id
+      WHERE ab.course_id = $1
+      ORDER BY ab.created_at DESC
+    `, [courseId]);
+
+    const results = [];
+    for (const test of tests.rows) {
+      const stats = await pool.query(`
+        SELECT
+          variant,
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE redeemed = true) as redeemed
+        FROM ab_test_results
+        WHERE ab_test_id = $1
+        GROUP BY variant
+      `, [test.id]);
+
+      const variantStats = { A: { total: 0, redeemed: 0 }, B: { total: 0, redeemed: 0 } };
+      for (const row of stats.rows) {
+        variantStats[row.variant] = {
+          total: parseInt(row.total),
+          redeemed: parseInt(row.redeemed)
+        };
+      }
+
+      results.push({ ...test, variants: variantStats });
+    }
+
+    res.json({ tests: results });
+  } catch (error) {
+    console.error('AB tests list error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/ab-tests - Create test (auto-deactivates existing test on same location)
+app.post('/api/admin/ab-tests', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+    const {
+      locationId, name,
+      variantARewardType, variantADescription, variantAEmoji,
+      variantBRewardType, variantBDescription, variantBEmoji
+    } = req.body;
+
+    // Deactivate existing test on this location
+    await pool.query(
+      'UPDATE ab_tests SET is_active = false, ended_at = NOW() WHERE location_id = $1 AND is_active = true',
+      [locationId]
+    );
+
+    const result = await pool.query(`
+      INSERT INTO ab_tests (
+        course_id, location_id, name,
+        variant_a_reward_type, variant_a_description, variant_a_emoji,
+        variant_b_reward_type, variant_b_description, variant_b_emoji
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *
+    `, [
+      courseId, locationId, name,
+      variantARewardType, variantADescription, variantAEmoji || '🎁',
+      variantBRewardType, variantBDescription, variantBEmoji || '🎁'
+    ]);
+
+    res.json({ test: result.rows[0] });
+  } catch (error) {
+    console.error('Create AB test error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/admin/ab-tests/:id - Toggle active/end test
+app.put('/api/admin/ab-tests/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { is_active } = req.body;
+
+    const updates = is_active
+      ? 'is_active = true, ended_at = NULL'
+      : 'is_active = false, ended_at = NOW()';
+
+    const result = await pool.query(
+      `UPDATE ab_tests SET ${updates} WHERE id = $1 RETURNING *`,
+      [id]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Test not found' });
+    res.json({ test: result.rows[0] });
+  } catch (error) {
+    console.error('Update AB test error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// REVENUE ROUTES
+// ============================================
+
+// POST /api/admin/revenue - Record revenue event
+app.post('/api/admin/revenue', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+    const { customerId, eventType, amount, source, locationId, notes, eventDate } = req.body;
+
+    const result = await pool.query(`
+      INSERT INTO revenue_events (course_id, customer_id, event_type, amount, source, attributed_location_id, notes, recorded_by, event_date)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      RETURNING *
+    `, [
+      courseId,
+      customerId || null,
+      eventType,
+      amount,
+      source || null,
+      locationId || null,
+      notes || null,
+      req.user.id,
+      eventDate || new Date().toISOString().split('T')[0]
+    ]);
+
+    res.json({ event: result.rows[0] });
+  } catch (error) {
+    console.error('Record revenue error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/revenue - List events with filters
+app.get('/api/admin/revenue', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+    const { eventType, startDate, endDate, customerId } = req.query;
+
+    let query = `
+      SELECT re.*, c.first_name, c.last_name, l.name as location_name
+      FROM revenue_events re
+      LEFT JOIN customers c ON re.customer_id = c.id
+      LEFT JOIN locations l ON re.attributed_location_id = l.id
+      WHERE re.course_id = $1
+    `;
+    const params = [courseId];
+    let idx = 2;
+
+    if (eventType) { query += ` AND re.event_type = $${idx++}`; params.push(eventType); }
+    if (startDate) { query += ` AND re.event_date >= $${idx++}`; params.push(startDate); }
+    if (endDate) { query += ` AND re.event_date <= $${idx++}`; params.push(endDate); }
+    if (customerId) { query += ` AND re.customer_id = $${idx++}`; params.push(customerId); }
+
+    query += ' ORDER BY re.event_date DESC LIMIT 200';
+
+    const result = await pool.query(query, params);
+    res.json({ events: result.rows });
+  } catch (error) {
+    console.error('List revenue error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/revenue/summary - Aggregated revenue data
+app.get('/api/admin/revenue/summary', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const courseId = req.user.courseId;
+
+    const total = await pool.query(
+      'SELECT COALESCE(SUM(amount), 0) as total FROM revenue_events WHERE course_id = $1',
+      [courseId]
+    );
+
+    const byType = await pool.query(`
+      SELECT event_type, SUM(amount) as total, COUNT(*) as count
+      FROM revenue_events WHERE course_id = $1
+      GROUP BY event_type ORDER BY total DESC
+    `, [courseId]);
+
+    const bySource = await pool.query(`
+      SELECT COALESCE(source, 'Unknown') as source, SUM(amount) as total, COUNT(*) as count
+      FROM revenue_events WHERE course_id = $1
+      GROUP BY source ORDER BY total DESC
+    `, [courseId]);
+
+    const byLocation = await pool.query(`
+      SELECT COALESCE(l.name, 'Unattributed') as location_name, SUM(re.amount) as total, COUNT(*) as count
+      FROM revenue_events re
+      LEFT JOIN locations l ON re.attributed_location_id = l.id
+      WHERE re.course_id = $1
+      GROUP BY l.name ORDER BY total DESC
+    `, [courseId]);
+
+    const topCustomers = await pool.query(`
+      SELECT c.first_name, c.last_name, c.email, SUM(re.amount) as ltv, COUNT(*) as transactions
+      FROM revenue_events re
+      JOIN customers c ON re.customer_id = c.id
+      WHERE re.course_id = $1
+      GROUP BY c.id, c.first_name, c.last_name, c.email
+      ORDER BY ltv DESC LIMIT 10
+    `, [courseId]);
+
+    // Conversion funnel
+    const totalCaptures = await pool.query(
+      'SELECT COUNT(*) FROM captures WHERE course_id = $1', [courseId]
+    );
+    const redeemedCaptures = await pool.query(
+      'SELECT COUNT(*) FROM captures WHERE course_id = $1 AND reward_redeemed = true', [courseId]
+    );
+    const repeatCustomers = await pool.query(
+      'SELECT COUNT(*) FROM customers WHERE course_id = $1 AND visit_count >= 2', [courseId]
+    );
+    const revenueCustomers = await pool.query(
+      'SELECT COUNT(DISTINCT customer_id) FROM revenue_events WHERE course_id = $1', [courseId]
+    );
+
+    res.json({
+      total: parseFloat(total.rows[0].total),
+      byType: byType.rows,
+      bySource: bySource.rows,
+      byLocation: byLocation.rows,
+      topCustomers: topCustomers.rows,
+      funnel: {
+        captures: parseInt(totalCaptures.rows[0].count),
+        redeemed: parseInt(redeemedCaptures.rows[0].count),
+        repeat: parseInt(repeatCustomers.rows[0].count),
+        revenue: parseInt(revenueCustomers.rows[0].count)
+      }
+    });
+  } catch (error) {
+    console.error('Revenue summary error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================
+// EMAIL PROCESSOR
+// ============================================
+
+async function processEmailQueue() {
+  let sent = 0;
+  let failed = 0;
+
+  try {
+    const pending = await pool.query(`
+      SELECT eq.*, c.first_name, c.last_name
+      FROM email_queue eq
+      LEFT JOIN customers c ON eq.customer_id = c.id
+      WHERE eq.status = 'pending' AND eq.scheduled_for <= NOW()
+      ORDER BY eq.scheduled_for ASC
+      LIMIT 50
+    `);
+
+    if (!process.env.SENDGRID_API_KEY) {
+      // Mark as sent even without SendGrid (development mode)
+      for (const email of pending.rows) {
+        await pool.query(
+          "UPDATE email_queue SET status = 'sent', sent_at = NOW() WHERE id = $1",
+          [email.id]
+        );
+        await pool.query(
+          'INSERT INTO email_logs (queue_id) VALUES ($1)',
+          [email.id]
+        );
+        sent++;
+      }
+      return { sent, failed, mode: 'dev' };
+    }
+
+    for (const email of pending.rows) {
+      try {
+        const msg = {
+          to: email.to_email,
+          from: FROM_EMAIL,
+          subject: email.subject,
+          html: email.body_html
+        };
+
+        const [response] = await sgMail.send(msg);
+        const messageId = response?.headers?.['x-message-id'] || null;
+
+        await pool.query(
+          "UPDATE email_queue SET status = 'sent', sent_at = NOW() WHERE id = $1",
+          [email.id]
+        );
+        await pool.query(
+          'INSERT INTO email_logs (queue_id, sendgrid_message_id) VALUES ($1, $2)',
+          [email.id, messageId]
+        );
+        sent++;
+      } catch (sendErr) {
+        console.error(`Failed to send email ${email.id}:`, sendErr.message);
+        await pool.query(
+          "UPDATE email_queue SET status = 'failed', error_message = $2 WHERE id = $1",
+          [email.id, sendErr.message]
+        );
+        failed++;
+      }
+    }
+  } catch (err) {
+    console.error('Email processor error:', err.message);
+  }
+
+  return { sent, failed };
+}
+
+// ============================================
 // ADMIN SEED & SETUP
 // ============================================
 
@@ -1427,6 +2297,14 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   await seedDefaultAdmin();
+
+  // Email processor - runs every 5 minutes
+  setInterval(async () => {
+    const result = await processEmailQueue();
+    if (result.sent > 0 || result.failed > 0) {
+      console.log(`Email processor: ${result.sent} sent, ${result.failed} failed`);
+    }
+  }, 5 * 60 * 1000);
 });
 
 module.exports = app;

@@ -50,6 +50,7 @@ function App() {
     <Router>
       <Routes>
         <Route path="/" element={<CaptureForm />} />
+        <Route path="/capture" element={<CaptureForm />} />
         <Route path="/admin" element={<ProtectedAdmin />} />
       </Routes>
     </Router>
