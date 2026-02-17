@@ -270,10 +270,9 @@ app.post('/api/capture', captureLimiter, async (req, res) => {
     const normalizedPhone = normalizePhone(phone);
     const normalizedEmail = email?.toLowerCase().trim();
     
-    // Check for existing customer by email or phone
+    // Check for existing customer by email only (not phone — different people can share a number)
     let customerId = null;
     let isNewCustomer = true;
-    let existingCapture = null;
 
     if (normalizedEmail) {
       const existingByEmail = await client.query(
@@ -286,52 +285,38 @@ app.post('/api/capture', captureLimiter, async (req, res) => {
       }
     }
 
-    if (!customerId && normalizedPhone) {
-      const existingByPhone = await client.query(
-        'SELECT id, visit_count FROM customers WHERE course_id = $1 AND phone = $2',
-        [courseId, normalizedPhone]
-      );
-      if (existingByPhone.rows.length > 0) {
-        customerId = existingByPhone.rows[0].id;
-        isNewCustomer = false;
-      }
-    }
-
-    // Check if this person has already claimed a reward
+    // Check if this email has already claimed a reward
     if (!isNewCustomer && customerId) {
       const captureCheck = await client.query(
         'SELECT id, reward_code FROM captures WHERE customer_id = $1 LIMIT 1',
         [customerId]
       );
       if (captureCheck.rows.length > 0) {
-        existingCapture = captureCheck.rows[0];
         await client.query('ROLLBACK');
         return res.status(400).json({
           success: false,
           error: 'already_claimed',
-          message: 'You have already claimed your reward.',
-          existingCode: existingCapture.reward_code
+          message: 'You have already claimed your reward.'
         });
       }
     }
 
-    // Also check by email/phone directly in captures (in case customer record differs)
-    if (normalizedEmail || normalizedPhone) {
+    // Also check by email directly in captures (in case customer record differs)
+    if (normalizedEmail) {
       const directCaptureCheck = await client.query(`
-        SELECT c.id, c.reward_code
+        SELECT c.id
         FROM captures c
         JOIN customers cu ON c.customer_id = cu.id
-        WHERE cu.course_id = $1 AND (cu.email = $2 OR cu.phone = $3)
+        WHERE cu.course_id = $1 AND cu.email = $2
         LIMIT 1
-      `, [courseId, normalizedEmail, normalizedPhone]);
+      `, [courseId, normalizedEmail]);
 
       if (directCaptureCheck.rows.length > 0) {
         await client.query('ROLLBACK');
         return res.status(400).json({
           success: false,
           error: 'already_claimed',
-          message: 'You have already claimed your reward.',
-          existingCode: directCaptureCheck.rows[0].reward_code
+          message: 'You have already claimed your reward.'
         });
       }
     }
