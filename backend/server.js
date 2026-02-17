@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const { Pool } = require('pg');
 const multer = require('multer');
 const csv = require('csv-parse');
@@ -21,12 +23,35 @@ dns.setDefaultResultOrder('ipv4first');
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
-// JWT Secret (use environment variable in production)
-const JWT_SECRET = process.env.JWT_SECRET || 'golf-capture-secret-change-in-production';
+// JWT Secret - require in production
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('WARNING: JWT_SECRET environment variable is not set. Authentication will not work securely.');
+  if (process.env.NODE_ENV === 'production') {
+    console.error('FATAL: JWT_SECRET is required in production. Set it in your Railway environment variables.');
+    process.exit(1);
+  }
+}
+const JWT_SECRET_VALUE = JWT_SECRET || 'dev-only-secret-do-not-use-in-production';
 
 // Middleware
-app.use(cors());
-app.use(express.json());
+app.use(helmet());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.use(express.json({ limit: '10mb' }));
+
+// Rate limiting for capture endpoint (prevent spam)
+const captureLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // 10 submissions per IP per 15 min
+  message: { error: 'Too many submissions. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false
+});
 
 // Auth Middleware
 const authenticateToken = (req, res, next) => {
@@ -38,7 +63,7 @@ const authenticateToken = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET_VALUE);
     req.user = decoded;
     next();
   } catch (err) {
@@ -209,7 +234,7 @@ function buildSegmentFilterSQL(filters, params, startIndex) {
 // ============================================
 
 // POST /api/capture - Submit capture form
-app.post('/api/capture', async (req, res) => {
+app.post('/api/capture', captureLimiter, async (req, res) => {
   const client = await pool.connect();
   
   try {
@@ -403,14 +428,54 @@ app.post('/api/capture', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Queue emails (after COMMIT so they reference committed data)
+    // Send reward code email immediately (not queued — must arrive now)
+    let emailSent = false;
+    try {
+      if (process.env.SENDGRID_API_KEY) {
+        const rewardEmail = {
+          to: normalizedEmail,
+          from: FROM_EMAIL,
+          subject: `Your Crescent Pointe Reward Code: ${rewardCode}`,
+          html: `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 20px;">
+              <div style="background: linear-gradient(135deg, #166534, #15803d); padding: 24px; border-radius: 16px 16px 0 0; text-align: center;">
+                <h1 style="color: white; margin: 0; font-size: 22px;">Crescent Pointe Golf Club</h1>
+                <p style="color: #bbf7d0; margin: 8px 0 0; font-size: 14px;">Thanks for joining our list!</p>
+              </div>
+              <div style="background: #ffffff; padding: 24px; border: 1px solid #e5e7eb; border-top: none;">
+                <p style="color: #374151; font-size: 16px; margin: 0 0 8px;">Hi ${firstName},</p>
+                <p style="color: #6b7280; font-size: 14px; margin: 0 0 20px;">Here's your reward code. Show it to any staff member to redeem:</p>
+                <div style="background: #f3f4f6; border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 16px;">
+                  <p style="font-size: 32px; font-weight: bold; font-family: monospace; color: #166534; margin: 0; letter-spacing: 4px;">${rewardCode}</p>
+                </div>
+                <div style="background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 12px; text-align: center; margin-bottom: 16px;">
+                  <p style="margin: 0; font-size: 18px;">${rewardEmoji} ${rewardDescription}</p>
+                  <p style="margin: 4px 0 0; color: #92400e; font-size: 13px;">Valid today only</p>
+                </div>
+                <p style="color: #9ca3af; font-size: 12px; text-align: center; margin: 16px 0 0;">Take a screenshot of this email to save your code.</p>
+              </div>
+              <div style="background: #f9fafb; padding: 16px; border-radius: 0 0 16px 16px; border: 1px solid #e5e7eb; border-top: none; text-align: center;">
+                <p style="color: #9ca3af; font-size: 11px; margin: 0;">Crescent Pointe Golf Club &bull; Myrtle Beach, SC</p>
+              </div>
+            </div>
+          `
+        };
+        await sgMail.send(rewardEmail);
+        emailSent = true;
+      } else {
+        // Dev mode - log and allow
+        console.log(`[DEV] Reward email for ${normalizedEmail}: code ${rewardCode}`);
+        emailSent = true;
+      }
+    } catch (emailErr) {
+      console.error('Reward email send error:', emailErr.message);
+    }
+
+    // Queue follow-up emails (delayed, non-blocking)
     const emailClient = await pool.connect();
     try {
       const updatedCustomer = await emailClient.query('SELECT * FROM customers WHERE id = $1', [customerId]);
       const cust = updatedCustomer.rows[0];
-
-      // Same-day thank you
-      await queueEmail(emailClient, courseId, customerId, 'same_day_thanks', { reward_code: rewardCode });
 
       // Follow-up based on local/visitor (72h delay built into template)
       if (cust.is_local) {
@@ -429,10 +494,11 @@ app.post('/api/capture', async (req, res) => {
       emailClient.release();
     }
 
+    // Do NOT send the reward code to the frontend — it goes to email only
     res.json({
       success: true,
-      rewardCode,
-      rewardType,
+      emailSent,
+      maskedEmail: normalizedEmail.replace(/(.{2})(.*)(@.*)/, '$1***$3'),
       rewardDescription,
       rewardEmoji,
       isNewCustomer,
@@ -1321,7 +1387,7 @@ app.post('/api/auth/login', async (req, res) => {
         courseId: user.course_id,
         courseSlug: user.course_slug
       },
-      JWT_SECRET,
+      JWT_SECRET_VALUE,
       { expiresIn: '24h' }
     );
 
